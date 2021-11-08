@@ -1,0 +1,4 @@
+python=3.8.12
+tensorflow=2.6.1
+gym=0.21.0
+ray=1.7.0
