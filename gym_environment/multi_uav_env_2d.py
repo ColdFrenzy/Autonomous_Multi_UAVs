@@ -1,10 +1,12 @@
 import os
 import numpy as np
+import pyglet
+import random
 from gym.spaces import Box, Dict, Discrete
 from ray.rllib.env.multi_agent_env import MultiAgentEnv
 from config.multi_uav_env_2d_config import MULTI_UAV_ENV_2D_CONFIG as conf_1
-img_dir = os.path.join(os.curdir, "images")
-uav_img = os.path.join(img_dir, "UAV_Icon.png")
+import config.colors as colors
+import config.paths as paths
 
 
 class MultiUavsEnv2D(MultiAgentEnv):
@@ -19,28 +21,35 @@ class MultiUavsEnv2D(MultiAgentEnv):
     def __init__(self, x=conf_1["x"],
                  y=conf_1["y"], n_actions=conf_1["n_actions"],
                  n_agents=conf_1["n_agents"],
+                 n_obstacles=conf_1["n_obstacles"],
+                 n_targets=conf_1["n_targets"],
                  obs_x=conf_1["obs_x"],
                  obs_y=conf_1["obs_y"],
-                 actions=conf_1["actions"]):
+                 actions=conf_1["actions"],
+                 max_charge=conf_1["max_charge"],
+                 energy_consumption=conf_1["energy_consumption"],
+                 task=conf_1["task"][0],
+                 cell_size=conf_1["cell_size"]):
         """__init__ method.
 
-        Parameters
-        ----------
-        x : int
-            Number of row of the 2D grid
-        y : int
-            Number of column of the 2D grid
-        n_actions: int
-            Number of actions an agent can perform
+        initialize the environment by defining the number of agents, number of
+        obstacles, grid size (x, y), max_charge, energy consumption, the task
+        ecc.
         """
         self.x = x
         self.y = y
         self.grid_size = (x, y)
         self.obs_x = obs_x
         self.obs_y = obs_y
+        self.max_charge = max_charge
         self.n_actions = n_actions
         self.n_agents = n_agents
+        self.n_obstacles = n_obstacles
+        self.n_targets = n_targets
         self.actions = actions
+        self.energy_consumption = energy_consumption
+        self.task = task
+        self.cell_size = cell_size
         self.viewer = None
         self.observation_space = Dict(
             {
@@ -51,27 +60,85 @@ class MultiUavsEnv2D(MultiAgentEnv):
         )
         self.action_space = Discrete(n_actions)
 
+        self.obstacles_pos = []
+        self.targets_pos = []
+        self.all_agents_charge = {
+            "uav_"+str(_): self.max_charge for _ in range(self.n_agents)
+        }
         self.all_agents_pos = {
-            "uav_"+str(_): None for _ in range(self.n_agents)}
+            "uav_"+str(_): None for _ in range(self.n_agents)
+        }
+        self.all_agents_prev_act = {
+            "uav_"+str(_): None for _ in range(self.n_agents)
+        }
 
-    def reset(self, initial_pos=None):
+    def random_initialization(self):
+        """random_initialization method.
+
+        Randomly initialize the agents and the obstacles over a given map
+        Returns
+        -------
+        uavs_initial_pos: list
+            list containing the initial position of the uavs
+        obstacles_pos: list
+            list containing the position of the obstacles
+        """
+        n_samples = self.n_agents + self.n_obstacles + self.n_targets
+        # sample unique indexes (same thing could be done by using
+        # random.shuffle and retrieving the first n elements)
+        indexes = random.sample(range(self.x*self.y), n_samples)
+        samples = []
+        for elem in indexes:
+            x = elem//self.y
+            y = elem % self.y
+            samples.append((x, y))
+        return samples[0:self.n_agents],\
+            samples[self.n_agents:self.n_agents + self.n_targets],\
+            samples[self.n_agents+self.n_targets:]
+
+    def reset(self, uavs_initial_pos=None, targets_pos=None,
+              obstacles_pos=None):
         """reset method.
 
-        If an initial position is not specified, the agents will be allocated
-        randomly
+        If an initial position is not specified, the agents and the obstacles
+        will be allocated randomly
         """
         self.grid = np.zeros(self.grid_size, dtype=np.float32)
         self.done = {
             "uav_"+str(_): False for _ in range(self.n_agents)}
         self.done["__all__"] = False
-        if initial_pos is None:
+        if uavs_initial_pos is None:
             pass
         else:
+            assert len(uavs_initial_pos) == self.n_agents,\
+                "The specified uavs locations do not match the number of" + \
+                " uavs in the environment"
             # insert agents in the map
             for n in range(self.n_agents):
-                i, j = initial_pos[n]
+                i, j = uavs_initial_pos[n]
+                assert self.is_on_grid(i, j),\
+                    f"The UAV position ({i, j}) is outside the grid "
                 self.all_agents_pos["uav_"+str(n)] = np.array([i, j])
                 self.grid[i, j] = 1
+            assert len(obstacles_pos) == self.n_obstacles,\
+                "The specified obstacle locations do not match the number" +\
+                " of obstacles in the environment"
+            for obstacle in obstacles_pos:
+                i, j = obstacle
+                assert self.is_on_grid(i, j),\
+                    f"The obstacle position ({i, j}) is outside the grid "
+                self.obstacles_pos.append(obstacle)
+                self.grid[i, j] = 2
+            assert len(targets_pos) == self.n_targets,\
+                "The specified target positions do not match the number of" + \
+                " targets in the environment"
+            for target in targets_pos:
+                i, j = target
+                assert self.is_on_grid(i, j),\
+                    f"The target position ({i, j}) is outside the grid "
+                self.targets_pos.append(target)
+                self.grid[i, j] = 3
+
         return self.get_all_agents_observation()
 
     def step(self, action_dict):
@@ -96,10 +163,19 @@ class MultiUavsEnv2D(MultiAgentEnv):
         new_positions = []
         indx_to_remove = []
         for agent in action_dict:
-            action = action_dict[agent]
+            # assert not self.done[agent], f"{agent} is out." \
+            #     " It cannot take any action "
+            action_indx = action_dict[agent]
+            action = self.actions[action_dict[agent]]
             agent_pos_x, agent_pos_y = self.all_agents_pos[agent]
             agent_new_pos_x = agent_pos_x + action[0]
             agent_new_pos_y = agent_pos_y + action[1]
+            # update energy
+            self.update_energy(agent, action_indx)
+            if self.all_agents_charge[agent] <= 0:
+                indx_to_remove.append(len(new_positions))
+                new_positions.append([-1, -1])
+                continue
             # check if the new position is on grid
             if self.is_on_grid(agent_new_pos_x, agent_new_pos_y):
                 # check if the new position collides with an obstacle
@@ -120,12 +196,13 @@ class MultiUavsEnv2D(MultiAgentEnv):
             else:
                 indx_to_remove.append(len(new_positions))
                 new_positions.append([agent_new_pos_x, agent_new_pos_y])
-        print(new_positions)
+
         # update position of the agents
         for i, agent in enumerate(action_dict):
             if i in indx_to_remove:
                 self.all_agents_pos[agent] = np.array([-1, -1])
                 self.done[agent] = True
+                self.all_agents_charge[agent] = 0
                 done[agent] = True
                 reward[agent] = -1.0
             else:
@@ -139,7 +216,7 @@ class MultiUavsEnv2D(MultiAgentEnv):
         for agent in done:
             if agent == "__all__":
                 continue
-            else:
+            elif done[agent] is False:
                 obs[agent] = self.get_agent_observation(agent)
 
         return obs, reward, done, info
@@ -186,6 +263,26 @@ class MultiUavsEnv2D(MultiAgentEnv):
 
         return obs
 
+    def update_energy(self, agent, curr_act):
+        """action_energy method.
+
+        update the energy of a uav after taking an action, based on its current
+        and previous action
+        """
+        if curr_act == 0:
+            self.all_agents_charge[agent] -= self.energy_consumption["still"]
+            return
+        # if no prev action, the episode is has just begun
+        if self.all_agents_prev_act[agent] is None:
+            self.all_agents_charge[agent] -= \
+                self.energy_consumption["different"]
+        else:
+            prev_act = self.all_agents_prev_act[agent]
+            if prev_act == curr_act:
+                self.all_agents_charge -= self.energy_consumption["same"]
+            else:
+                self.all_agents_charge -= self.energy_consumption["different"]
+
     def is_on_grid(self, x, y):
         """is_on_grid function.
 
@@ -205,7 +302,7 @@ class MultiUavsEnv2D(MultiAgentEnv):
         # if the new position is on grid, check if it collide with an obstacle
         if self.is_on_grid(x, y):
             if self.grid(x, y) == 0:
-                return
+                return True
 
     def render(self, mode="human", screen_width=600, screen_height=400):
         """render method.
@@ -216,9 +313,12 @@ class MultiUavsEnv2D(MultiAgentEnv):
             # new elements are added in the bottom left corner. To center them,
             # translate by (screen_width/2, screen_height/2)
             from gym.envs.classic_control import rendering
-            cell_size = 50
-            screen_width = cell_size * self.x
-            screen_height = cell_size * self.y
+            screen_width = self.cell_size * (self.y+1)
+            screen_height = self.cell_size * (self.x+1)
+            # displacement represents the space outside the grid
+            d_x = self.cell_size
+            d_y = self.cell_size
+            radius = self.cell_size/3
             background_width = screen_width
             background_height = screen_height
             # this is necessary otherwise it crates new
@@ -239,47 +339,129 @@ class MultiUavsEnv2D(MultiAgentEnv):
                 background.add_attr(backtrans)
                 background.set_color(1.0, 1.0, 1.0)
                 self.viewer.add_geom(background)
-                for i in range(self.x):
-                    row_line = rendering.Line(start=(0, i*cell_size),
-                                              end=(screen_width, i*cell_size))
+                # =============================================================
+                # GRID
+                # =============================================================
+                for i in range(self.x+1):
+                    row_line = rendering.Line(start=(self.cell_size,
+                                                     i*self.cell_size,),
+                                              end=(screen_width,
+                                                   i*self.cell_size))
+                    if i != self.x:
+                        row_num = pyglet.text.Label(
+                            str(i),
+                            # font_name='Times New Roman',
+                            font_size=14,
+                            x=self.cell_size/2,
+                            y=((self.x-1)-i)*self.cell_size +
+                            self.cell_size/2,
+                            anchor_x='center', anchor_y='center',
+                            color=colors.BLACK_RGBA)
+                        self.viewer.add_geom(DrawText(row_num))
                     self.viewer.add_geom(row_line)
-                for j in range(self.y):
-                    col_line = rendering.Line(start=(j*cell_size, 0),
-                                              end=(j*cell_size, screen_height))
+                for j in range(self.y+1):
+                    col_line = rendering.Line(start=(j*self.cell_size,
+                                                     0),
+                                              end=(j*self.cell_size,
+                                                   screen_height -
+                                                   self.cell_size))
+                    if j != 0:
+                        col_num = pyglet.text.Label(
+                            str(j-1),
+                            # font_name='Times New Roman',
+                            font_size=14,
+                            y=(self.x-1)*self.cell_size +
+                            self.cell_size/2 + d_y,
+                            x=j*self.cell_size + self.cell_size/2,
+                            anchor_x='center', anchor_y='center',
+                            color=colors.BLACK_RGBA)
+                        self.viewer.add_geom(DrawText(col_num))
                     self.viewer.add_geom(col_line)
-
-                # self.uavs = {}
-                for agent in self.all_agents_pos:
-                    agent_pos_x, agent_pos_y = self.all_agents_pos[agent]
-                    if [agent_pos_x, agent_pos_y] == [-1, -1]:
-                        continue
-                    uav = rendering.Image(uav_img, cell_size, cell_size)
-                    uav_transf = rendering.Transform(
+                # =============================================================
+                # OBSTACLES
+                # =============================================================
+                for obstacle_pos in self.obstacles_pos:
+                    obstacle_x, obstacle_y = obstacle_pos
+                    obs_img = random.choice(paths.OBSTACLES)
+                    obstacle = rendering.Image(obs_img, self.cell_size,
+                                               self.cell_size)
+                    obstacle_transf = rendering.Transform(
                         translation=(
-                            agent_pos_x*cell_size + cell_size/2,
-                            agent_pos_y*cell_size + cell_size/2
+                            obstacle_y*self.cell_size + self.cell_size/2 + d_x,
+                            ((self.x-1)-obstacle_x)*self.cell_size +
+                            self.cell_size/2
                         )
                     )
-                    uav.add_attr(uav_transf)
-                    self.viewer.add_onetime(uav)
-                    # self.uavs[agent] = uav
-            else:
-                for agent in self.all_agents_pos:
-                    agent_pos_x, agent_pos_y = self.all_agents_pos[agent]
-                    if [agent_pos_x, agent_pos_y] == [-1, -1]:
-                        continue
-                    uav = rendering.Image(uav_img, cell_size, cell_size)
-                    uav_transf = rendering.Transform(
+                    obstacle.add_attr(obstacle_transf)
+                    self.viewer.add_geom(obstacle)
+                # =============================================================
+                # TARGETS
+                # =============================================================
+                for target_pos in self.targets_pos:
+                    target_x, target_y = target_pos
+                    target = rendering.make_circle(radius)
+                    target_transf = rendering.Transform(
                         translation=(
-                            agent_pos_x*cell_size + cell_size/2,
-                            agent_pos_y*cell_size + cell_size/2
+                            target_y*self.cell_size + self.cell_size/2 + d_x,
+                            ((self.x-1)-target_x)*self.cell_size +
+                            self.cell_size/2
                         )
                     )
-                    uav.add_attr(uav_transf)
-                    self.viewer.add_onetime(uav)
-
-            # for uav in self.uavs:
-            #     uav.add_attr()
+                    target.add_attr(target_transf)
+                    target.set_color(*colors.TARGET_RGB)
+                    self.viewer.add_geom(target)
+            # =============================================================
+            # UAVS AND UAVS_FOV
+            # =============================================================
+            for agent in self.all_agents_pos:
+                agent_pos_x, agent_pos_y = self.all_agents_pos[agent]
+                if [agent_pos_x, agent_pos_y] == [-1, -1]:
+                    continue
+                uav_img = paths.UAV_HIGH_IMG
+                uav = rendering.Image(uav_img, self.cell_size, self.cell_size)
+                l, r, t, b = (
+                    -self.obs_y*self.cell_size - self.cell_size/2,
+                    self.obs_y*self.cell_size + self.cell_size/2,
+                    self.obs_x*self.cell_size + self.cell_size/2,
+                    -self.obs_x*self.cell_size - self.cell_size/2,
+                )
+                uav_fov = rendering.FilledPolygon(
+                    [(l, b), (l, t), (r, t), (r, b)])
+                uav_fov_edges = rendering.PolyLine(
+                    [(l, b), (l, t), (r, t), (r, b)], True)
+                fov_trans = rendering.Transform(
+                    translation=(
+                        agent_pos_y*self.cell_size + self.cell_size/2 + d_x,
+                        ((self.x-1)-agent_pos_x)*self.cell_size +
+                        self.cell_size/2
+                    )
+                )
+                uav_fov.add_attr(fov_trans)
+                uav_fov_edges.add_attr(fov_trans)
+                uav_fov._color.vec4 = colors.FOV
+                uav_fov_edges.set_color(*colors.FOV_EDGES)
+                uav_name = pyglet.text.Label(
+                    agent[-1],
+                    # font_name='Times New Roman',
+                    font_size=14,
+                    x=agent_pos_y*self.cell_size + self.cell_size/2 + d_x,
+                    y=((self.x-1)-agent_pos_x)*self.cell_size +
+                    self.cell_size/2,
+                    anchor_x='center', anchor_y='center',
+                    color=colors.WHITE_RGBA)
+                uav_transf = rendering.Transform(
+                    translation=(
+                        agent_pos_y*self.cell_size + self.cell_size/2 + d_x,
+                        ((self.x-1)-agent_pos_x)*self.cell_size +
+                        self.cell_size/2
+                    )
+                )
+                uav.add_attr(uav_transf)
+                # one time since their position change at every timestep
+                self.viewer.add_onetime(uav_fov_edges)
+                self.viewer.add_onetime(uav_fov)
+                self.viewer.add_onetime(uav)
+                self.viewer.add_onetime(DrawText(uav_name))
 
             return self.viewer.render(return_rgb_array=mode == "rgb_array")
 
@@ -293,16 +475,22 @@ class MultiUavsEnv2D(MultiAgentEnv):
             self.viewer = None
 
 
+class DrawText:
+    """DrawText class.
+
+    class used to render text on pyglet window
+    """
+
+    def __init__(self, label: pyglet.text.Label):
+        self.label = label
+
+    def render(self):
+        """render method.
+
+        render the label
+        """
+        self.label.draw()
+
+
 if __name__ == "__main__":
-    # random_input = tf.ones((20, 10))
-    # test_model = tf.keras.layers.Dense(100)
-    # output = test_model(random_input)
-    # print("Hello, the output is " + str(output))
-    env = MultiUavsEnv2D(n_agents=4)
-    initial_pos = np.array([[0, 0], [3, 5], [20, 10], [31, 15]])
-    obs = env.reset(initial_pos)
-    grid_0 = env.grid
-    # stay, up, down, left, right
-    action_dict = {"uav_0": 2, "uav_1": 3, "uav_2": 0, "uav_3": 4}
-    obs, reward, done, info = env.step(action_dict)
-    grid_1 = env.grid
+    print("hello")
