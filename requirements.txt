@@ -1,4 +1,5 @@
 python=3.8.12
 tensorflow=2.6.1
+pyglet==1.5.21
 gym=0.21.0
 ray=1.7.0

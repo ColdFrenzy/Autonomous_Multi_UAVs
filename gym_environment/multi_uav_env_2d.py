@@ -488,7 +488,8 @@ class MultiUavsEnv2D(MultiAgentEnv):
                 self.viewer.add_onetime(uav)
                 self.viewer.add_onetime(DrawText(uav_name))
 
-            return self.viewer.render(return_rgb_array=mode == "rgb_array")
+            # =mode == "rgb_array")
+            return self.viewer.render(return_rgb_array=True)
 
     def draw_trajectory(self, agent, action):
         """draw_trajectory method.
@@ -516,28 +517,32 @@ class MultiUavsEnv2D(MultiAgentEnv):
                 full_arrow)
             top_arrow.add_attr(center_transf)
             top_arrow.set_color(*traj_color)
-            self.viewer.add_geom(top_arrow)
+            # self.viewer.add_geom(top_arrow)
+            self.viewer.add_onetime(top_arrow)
         elif action == 2:
             bot_arrow = rendering.PolyLine(
                 [(-arrow_width, 0), (0, -arrow_length), (arrow_width, 0)],
                 full_arrow)
             bot_arrow.add_attr(center_transf)
             bot_arrow.set_color(*traj_color)
-            self.viewer.add_geom(bot_arrow)
+            # self.viewer.add_geom(bot_arrow)
+            self.viewer.add_onetime(bot_arrow)
         elif action == 3:
             left_arrow = rendering.PolyLine(
                 [(0, arrow_width), (-arrow_length, 0), (0, -arrow_width)],
                 full_arrow)
             left_arrow.add_attr(center_transf)
             left_arrow.set_color(*traj_color)
-            self.viewer.add_geom(left_arrow)
+            # self.viewer.add_geom(left_arrow)
+            self.viewer.add_onetime(left_arrow)
         elif action == 4:
             right_arrow = rendering.PolyLine(
                 [(0, arrow_width), (arrow_length, 0), (0, -arrow_width)],
                 full_arrow)
             right_arrow.add_attr(center_transf)
             right_arrow.set_color(*traj_color)
-            self.viewer.add_geom(right_arrow)
+            # self.viewer.add_geom(right_arrow)
+            self.viewer.add_onetime(right_arrow)
         else:
             print(f"invalid action: {action}")
 

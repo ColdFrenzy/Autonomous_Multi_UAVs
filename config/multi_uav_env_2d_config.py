@@ -34,7 +34,7 @@ MULTI_UAV_ENV_2D_CONFIG = {
         "right": 4
 
     },
-    "max_charge": 3.0,
+    "max_charge": 8.0,
     # energy consumption associated with an action.
     # if the uav keep moving in the same direction it will consume less energy
     # if it stay still or it accellerate to change direction, it consumes a

@@ -6,8 +6,11 @@ import tensorflow as tf
 import random
 import time
 import numpy as np
+from PIL import Image
 
-
+save_gif = True
+images = []
+width = 300
 if __name__ == "__main__":
     env = MultiUavsEnv2D(n_agents=4)
     # uavs_initial_pos = np.array([[0, 0], [3, 5], [7, 9], [8, 6]])
@@ -29,9 +32,13 @@ if __name__ == "__main__":
         # stay 0 (0,0), up 1 (-1,0), down 2 (1,0), left 3 (0, -1),
         # right 4 (0, 1)
         obs, reward, done, info = env.step(action_dict)
-        env.render()
+        images.append(Image.fromarray(env.render()))
         time.sleep(3)
 
         count += 1
-
+    if save_gif is True:
+        images[0].save('./2D_Multi_UAVs_2.gif',
+                       save_all=True, append_images=images[1:],
+                       duration=300, optimize=False,
+                       loop=0)
     env.close()
