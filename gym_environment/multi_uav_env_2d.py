@@ -3,6 +3,7 @@ import numpy as np
 import pyglet
 import random
 from gym.spaces import Box, Dict, Discrete
+from gym.envs.classic_control import rendering
 from ray.rllib.env.multi_agent_env import MultiAgentEnv
 from config.multi_uav_env_2d_config import MULTI_UAV_ENV_2D_CONFIG as conf_1
 import config.colors as colors
@@ -49,6 +50,7 @@ class MultiUavsEnv2D(MultiAgentEnv):
         self.actions = actions
         self.energy_consumption = energy_consumption
         self.task = task
+        self.mode = None
         self.cell_size = cell_size
         self.viewer = None
         self.observation_space = Dict(
@@ -70,6 +72,10 @@ class MultiUavsEnv2D(MultiAgentEnv):
         }
         self.all_agents_prev_act = {
             "uav_"+str(_): None for _ in range(self.n_agents)
+        }
+        self.uavs_traj_color = {
+            "uav_"+str(_): np.random.choice(range(256), size=3)/255
+            for _ in range(self.n_agents)
         }
 
     def random_initialization(self):
@@ -206,18 +212,23 @@ class MultiUavsEnv2D(MultiAgentEnv):
                 done[agent] = True
                 reward[agent] = -1.0
             else:
+                if self.mode == "human":
+                    self.draw_trajectory(agent, action_dict[agent])
                 self.all_agents_pos[agent] = np.array(new_positions[i])
                 self.grid[new_positions[i][0], new_positions[i][1]] = 1
                 done[agent] = False
                 reward[agent] = 0.0
-
         # after all the position have been updated, we can retrieve agents
         # observations
+        done_agents = 0
         for agent in done:
             if agent == "__all__":
                 continue
             elif done[agent] is False:
                 obs[agent] = self.get_agent_observation(agent)
+                done_agents += 1
+        if done_agents == 0:
+            self.done["__all__"] = True
 
         return obs, reward, done, info
 
@@ -309,22 +320,23 @@ class MultiUavsEnv2D(MultiAgentEnv):
 
         Render the 2D scenario
         """
+        self.mode = mode
         if mode == "human":
             # new elements are added in the bottom left corner. To center them,
             # translate by (screen_width/2, screen_height/2)
-            from gym.envs.classic_control import rendering
-            screen_width = self.cell_size * (self.y+1)
-            screen_height = self.cell_size * (self.x+1)
+            self.screen_width = self.cell_size * (self.y+1)
+            self.screen_height = self.cell_size * (self.x+1)
             # displacement represents the space outside the grid
-            d_x = self.cell_size
-            d_y = self.cell_size
-            radius = self.cell_size/3
-            background_width = screen_width
-            background_height = screen_height
+            self.d_x = self.cell_size
+            self.d_y = self.cell_size
+            self.radius = self.cell_size/3
+            background_width = self.screen_width
+            background_height = self.screen_height
             # this is necessary otherwise it crates new
             if self.viewer is None:
                 # if viewer is None, let's initialize the grid
-                self.viewer = rendering.Viewer(screen_width, screen_height)
+                self.viewer = rendering.Viewer(
+                    self.screen_width, self.screen_height)
                 l, r, t, b = (
                     -background_width / 2,
                     background_width / 2,
@@ -334,7 +346,7 @@ class MultiUavsEnv2D(MultiAgentEnv):
                 background = rendering.FilledPolygon(
                     [(l, b), (l, t), (r, t), (r, b)])
                 backtrans = rendering.Transform(
-                    translation=(screen_width / 2, screen_height / 2)
+                    translation=(self.screen_width / 2, self.screen_height / 2)
                 )
                 background.add_attr(backtrans)
                 background.set_color(1.0, 1.0, 1.0)
@@ -345,7 +357,7 @@ class MultiUavsEnv2D(MultiAgentEnv):
                 for i in range(self.x+1):
                     row_line = rendering.Line(start=(self.cell_size,
                                                      i*self.cell_size,),
-                                              end=(screen_width,
+                                              end=(self.screen_width,
                                                    i*self.cell_size))
                     if i != self.x:
                         row_num = pyglet.text.Label(
@@ -363,7 +375,7 @@ class MultiUavsEnv2D(MultiAgentEnv):
                     col_line = rendering.Line(start=(j*self.cell_size,
                                                      0),
                                               end=(j*self.cell_size,
-                                                   screen_height -
+                                                   self.screen_height -
                                                    self.cell_size))
                     if j != 0:
                         col_num = pyglet.text.Label(
@@ -371,7 +383,7 @@ class MultiUavsEnv2D(MultiAgentEnv):
                             # font_name='Times New Roman',
                             font_size=14,
                             y=(self.x-1)*self.cell_size +
-                            self.cell_size/2 + d_y,
+                            self.cell_size/2 + self.d_y,
                             x=j*self.cell_size + self.cell_size/2,
                             anchor_x='center', anchor_y='center',
                             color=colors.BLACK_RGBA)
@@ -387,8 +399,8 @@ class MultiUavsEnv2D(MultiAgentEnv):
                                                self.cell_size)
                     obstacle_transf = rendering.Transform(
                         translation=(
-                            obstacle_y*self.cell_size + self.cell_size/2 + d_x,
-                            ((self.x-1)-obstacle_x)*self.cell_size +
+                            obstacle_y*self.cell_size + self.cell_size/2 +
+                            self.d_x, ((self.x-1)-obstacle_x)*self.cell_size +
                             self.cell_size/2
                         )
                     )
@@ -399,25 +411,38 @@ class MultiUavsEnv2D(MultiAgentEnv):
                 # =============================================================
                 for target_pos in self.targets_pos:
                     target_x, target_y = target_pos
-                    target = rendering.make_circle(radius)
+                    # target = rendering.make_circle(radius)
+                    target_img = paths.WIN_FLAG
+                    target = rendering.Image(target_img, self.cell_size/2,
+                                             self.cell_size/2)
                     target_transf = rendering.Transform(
                         translation=(
-                            target_y*self.cell_size + self.cell_size/2 + d_x,
-                            ((self.x-1)-target_x)*self.cell_size +
+                            target_y*self.cell_size + self.cell_size/2 +
+                            self.d_x, ((self.x-1)-target_x)*self.cell_size +
                             self.cell_size/2
                         )
                     )
                     target.add_attr(target_transf)
-                    target.set_color(*colors.TARGET_RGB)
+                    # target.set_color(*colors.TARGET_RGB)
                     self.viewer.add_geom(target)
-            # =============================================================
+            # =================================================================
             # UAVS AND UAVS_FOV
-            # =============================================================
+            # =================================================================
             for agent in self.all_agents_pos:
                 agent_pos_x, agent_pos_y = self.all_agents_pos[agent]
                 if [agent_pos_x, agent_pos_y] == [-1, -1]:
                     continue
-                uav_img = paths.UAV_HIGH_IMG
+                if self.max_charge - self.max_charge/3 \
+                    < self.all_agents_charge[agent]\
+                        <= self.max_charge:
+                    uav_img = paths.UAV_HIGH_IMG
+                elif self.max_charge - self.max_charge*2/3 \
+                    < self.all_agents_charge[agent]\
+                        <= self.max_charge - self.max_charge/3:
+                    uav_img = paths.UAV_MID_IMG
+                elif 0 <= self.all_agents_charge[agent] \
+                        <= self.max_charge - self.max_charge*2/3:
+                    uav_img = paths.UAV_LOW_IMG
                 uav = rendering.Image(uav_img, self.cell_size, self.cell_size)
                 l, r, t, b = (
                     -self.obs_y*self.cell_size - self.cell_size/2,
@@ -431,8 +456,8 @@ class MultiUavsEnv2D(MultiAgentEnv):
                     [(l, b), (l, t), (r, t), (r, b)], True)
                 fov_trans = rendering.Transform(
                     translation=(
-                        agent_pos_y*self.cell_size + self.cell_size/2 + d_x,
-                        ((self.x-1)-agent_pos_x)*self.cell_size +
+                        agent_pos_y*self.cell_size + self.cell_size/2 +
+                        self.d_x, ((self.x-1)-agent_pos_x)*self.cell_size +
                         self.cell_size/2
                     )
                 )
@@ -444,15 +469,15 @@ class MultiUavsEnv2D(MultiAgentEnv):
                     agent[-1],
                     # font_name='Times New Roman',
                     font_size=14,
-                    x=agent_pos_y*self.cell_size + self.cell_size/2 + d_x,
+                    x=agent_pos_y*self.cell_size + self.cell_size/2 + self.d_x,
                     y=((self.x-1)-agent_pos_x)*self.cell_size +
                     self.cell_size/2,
                     anchor_x='center', anchor_y='center',
                     color=colors.WHITE_RGBA)
                 uav_transf = rendering.Transform(
                     translation=(
-                        agent_pos_y*self.cell_size + self.cell_size/2 + d_x,
-                        ((self.x-1)-agent_pos_x)*self.cell_size +
+                        agent_pos_y*self.cell_size + self.cell_size/2 +
+                        self.d_x, ((self.x-1)-agent_pos_x)*self.cell_size +
                         self.cell_size/2
                     )
                 )
@@ -464,6 +489,57 @@ class MultiUavsEnv2D(MultiAgentEnv):
                 self.viewer.add_onetime(DrawText(uav_name))
 
             return self.viewer.render(return_rgb_array=mode == "rgb_array")
+
+    def draw_trajectory(self, agent, action):
+        """draw_trajectory method.
+
+        It draws the trajectory of the uavs after they take an action inside
+        the step function
+        """
+        agent_pos_x, agent_pos_y = self.all_agents_pos[agent]
+        center_transf = rendering.Transform(
+            translation=(
+                agent_pos_y*self.cell_size + self.cell_size/2 + self.d_x,
+                        ((self.x-1)-agent_pos_x)*self.cell_size +
+                self.cell_size/2
+            )
+        )
+        full_arrow = True
+        traj_color = self.uavs_traj_color[agent]
+        arrow_width = self.cell_size/10
+        arrow_length = arrow_width*2
+        if action == 0:
+            print(f" agent {agent} didn't move")
+        elif action == 1:
+            top_arrow = rendering.PolyLine(
+                [(-arrow_width, 0), (0, arrow_length), (arrow_width, 0)],
+                full_arrow)
+            top_arrow.add_attr(center_transf)
+            top_arrow.set_color(*traj_color)
+            self.viewer.add_geom(top_arrow)
+        elif action == 2:
+            bot_arrow = rendering.PolyLine(
+                [(-arrow_width, 0), (0, -arrow_length), (arrow_width, 0)],
+                full_arrow)
+            bot_arrow.add_attr(center_transf)
+            bot_arrow.set_color(*traj_color)
+            self.viewer.add_geom(bot_arrow)
+        elif action == 3:
+            left_arrow = rendering.PolyLine(
+                [(0, arrow_width), (-arrow_length, 0), (0, -arrow_width)],
+                full_arrow)
+            left_arrow.add_attr(center_transf)
+            left_arrow.set_color(*traj_color)
+            self.viewer.add_geom(left_arrow)
+        elif action == 4:
+            right_arrow = rendering.PolyLine(
+                [(0, arrow_width), (arrow_length, 0), (0, -arrow_width)],
+                full_arrow)
+            right_arrow.add_attr(center_transf)
+            right_arrow.set_color(*traj_color)
+            self.viewer.add_geom(right_arrow)
+        else:
+            print(f"invalid action: {action}")
 
     def close(self):
         """close method.

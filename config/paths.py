@@ -29,5 +29,10 @@ HOUSE2 = os.path.join(IMG_DIR, "house2_top_view.png")
 
 OBSTACLES = [TREE1, TREE2, HOUSE1, HOUSE2]
 
+# =============================================================================
+# TARGETS
+# =============================================================================
+WIN_FLAG = os.path.join(IMG_DIR, "finish_flag.png")
+
 
 print(IMG_DIR)
